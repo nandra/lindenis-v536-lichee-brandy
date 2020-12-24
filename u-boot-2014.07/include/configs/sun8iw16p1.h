@@ -160,7 +160,7 @@
 #define CONFIG_NS16550_FIFO_ENABLE	(1)
 
 #ifdef CONFIG_SUN8IW16P1_NOR
-#define CONFIG_CONS_INDEX			1			/* which serial channel for console */
+#define CONFIG_CONS_INDEX			5			/* which serial channel for console */
 #else
 #define CONFIG_CONS_INDEX			5			/* which serial channel for console */
 #endif

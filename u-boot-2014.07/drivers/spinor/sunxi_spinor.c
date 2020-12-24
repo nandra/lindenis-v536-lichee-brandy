@@ -58,6 +58,9 @@ static int check_mbr_flag;
 #define SPI_NORMAL_FRQ (40000000)
 #define SPINOR_FREAD_QUAD_OUT 0x6b
 
+#define SPINOR_OP_RESTEN       0x66    /* Reset enable*/
+#define SPINOR_OP_RESET                0x99    /* Reset device*/
+
 static void spinor_enter_4bytes_addr(int);
 static void spinor_config_addr_mode(u8 *sdata, uint page_addr, uint *num,
 				    u8 cmd);
@@ -270,7 +273,7 @@ __err_out_:
 static int __spinor_erase_block(uint block_index)
 {
 	uint blk_addr = block_index * SPINOR_BLOCK_BYTES;
-	u8 sdata[4] = {0};
+    u8    sdata[5] = {0};
 	int ret = -1;
 	u8 status = 0;
 	uint i = 0;
@@ -281,13 +284,9 @@ static int __spinor_erase_block(uint block_index)
 		return -1;
 	}
 
-	txnum = 4;
 	rxnum = 0;
 
-	sdata[0] = SPINOR_SE;
-	sdata[1] = (blk_addr >> 16) & 0xff;
-	sdata[2] = (blk_addr >> 8) & 0xff;
-	sdata[3] = blk_addr & 0xff;
+	spinor_config_addr_mode(sdata,blk_addr,&txnum,SPINOR_SE);
 
 	spic_config_dual_mode(0, 0, 0, txnum);
 	ret = spic_rw(txnum, (void *)sdata, rxnum, 0);
@@ -453,7 +452,6 @@ static int spi_nor_fast_read_dual_output(uint start, uint sector_cnt, void *buf)
 	uint tmp_cnt, tmp_offset = 0;
 	void *tmp_buf;
 	uint txnum, rxnum;
-	txnum = 5;
 	while (sector_cnt) {
 		if (sector_cnt > 127) {
 			tmp_cnt = 127;
@@ -464,11 +462,7 @@ static int spi_nor_fast_read_dual_output(uint start, uint sector_cnt, void *buf)
 		page_addr = (start + tmp_offset) * SYSTEM_PAGE_SIZE;
 		rbyte_cnt = tmp_cnt * SYSTEM_PAGE_SIZE;
 
-		sdata[0] = SPINOR_FREAD_DUAL_OUT;
-		sdata[1] = (page_addr >> 16) & 0xff;
-		sdata[2] = (page_addr >> 8) & 0xff;
-		sdata[3] = page_addr & 0xff;
-		sdata[4] = 0;
+            spinor_config_addr_mode(sdata,page_addr,&txnum,SPINOR_FREAD_DUAL_OUT);
 
 		rxnum = rbyte_cnt;
 		tmp_buf = (u8 *)buf + (tmp_offset << 9);
@@ -495,12 +489,11 @@ static int __spinor_sector_normal_read(uint start, uint sector_cnt, void *buf)
 {
 	uint page_addr;
 	uint rbyte_cnt;
-	u8 sdata[4] = {0};
+	u8   sdata[5] = {0};
 	int ret = 0;
 	uint tmp_cnt, tmp_offset = 0;
 	void *tmp_buf;
 	uint txnum, rxnum;
-	txnum = 4;
 	while (sector_cnt) {
 		if (sector_cnt > 127) {
 			tmp_cnt = 127;
@@ -510,10 +503,8 @@ static int __spinor_sector_normal_read(uint start, uint sector_cnt, void *buf)
 
 		page_addr = (start + tmp_offset) * SYSTEM_PAGE_SIZE;
 		rbyte_cnt = tmp_cnt * SYSTEM_PAGE_SIZE;
-		sdata[0] = SPINOR_READ;
-		sdata[1] = (page_addr >> 16) & 0xff;
-		sdata[2] = (page_addr >> 8) & 0xff;
-		sdata[3] = page_addr & 0xff;
+
+	    spinor_config_addr_mode(sdata,page_addr,&txnum,SPINOR_READ);
 
 		rxnum = rbyte_cnt;
 		tmp_buf = (u8 *)buf + (tmp_offset << 9);
@@ -594,6 +585,23 @@ static int __spinor_sector_write(uint sector_start, uint sector_cnt, void *buf)
 	}
 
 	return 0;
+}
+
+/* for reset the spinor that can exit some mode, such as 4-byte, quad and so on*/
+static void __spinor_reset(void)
+{
+	u8   sdata[1] = {0};
+	int rxnum = 0;
+	int txnum = 1;
+
+	sdata[0] = SPINOR_OP_RESTEN;
+	spic_config_dual_mode(0, 0, 0, txnum);
+	spic_rw(txnum, (void *)sdata, rxnum, 0);
+
+	sdata[0] = SPINOR_OP_RESET;
+	spic_config_dual_mode(0, 0, 0, txnum);
+	spic_rw(txnum, (void *)sdata, rxnum, 0);
+
 }
 
 static int set_quad_mode(uint spinor_id, u8 cmd1, u8 cmd2)
@@ -752,6 +760,8 @@ int spinor_exit(int force)
 		if (spinor_flush_cache()) {
 			return -1;
 		}
+		/* reset the chip of spinor */
+		__spinor_reset();
 		free(spinor_store_buffer);
 		free_noncache(spinor_write_cache);
 		spic_exit(0);
@@ -1506,10 +1516,26 @@ u32 try_spi_nor(u32 spino)
 	return 0;
 }
 
+static int __spinor_rdcr(u8 *reg)
+{
+	u8 sdata = 0x15;
+	int ret = -1;
+	int  txnum ;
+
+	txnum = 1;
+
+	spic_config_dual_mode(0, 0, 0, txnum);
+	ret = spic_rw(1, (void *)&sdata, 1, (void *)reg);
+
+	return ret;
+}
+
 static void spinor_enter_4bytes_addr(int enable)
 {
 	int command = 0;
-	if (spinor_4bytes_addr_mode == 1 && enable == 1)
+	u8 buf=0;
+
+	if(spinor_4bytes_addr_mode == 1 && enable == 1)
 		command = 0xB7;
 	else if (spinor_4bytes_addr_mode == 1 && enable == 0)
 		command = 0xE9;
@@ -1518,7 +1544,11 @@ static void spinor_enter_4bytes_addr(int enable)
 
 	spic_config_dual_mode(0, 0, 0, 1);
 
-	spic_rw(1, (void *)&command, 0, 0);
+	spic_rw(1, (void*)&command, 0, NULL);
+
+	__spinor_rdcr(&buf);
+	if((buf >> 5)  & 0x1)
+			printf("4byte mode ok\n");
 	return;
 }
 
@@ -1646,12 +1676,11 @@ static int spi_nor_fast_read_quad_output(uint start, uint sector_cnt, void *buf)
 	uint page_addr;
 	uint rbyte_cnt;
 	int ret = 0;
-	u8 sdata[5] = {0};
+	u8 sdata[6] = {0};
 	uint tmp_cnt, tmp_offset = 0;
 	void *tmp_buf;
 	uint txnum, rxnum;
-	sunxi_mbr_t *mbr;
-	txnum = 5;
+	sunxi_mbr_t	*mbr;
 
 	while (sector_cnt) {
 		if (sector_cnt > 127)
@@ -1662,13 +1691,10 @@ static int spi_nor_fast_read_quad_output(uint start, uint sector_cnt, void *buf)
 		page_addr = (start + tmp_offset) * SYSTEM_PAGE_SIZE;
 		rbyte_cnt = tmp_cnt * SYSTEM_PAGE_SIZE;
 
-		sdata[0] = SPINOR_FREAD_QUAD_OUT;
-		sdata[1] = (page_addr >> 16) & 0xff;
-		sdata[2] = (page_addr >> 8) & 0xff;
-		sdata[3] = page_addr & 0xff;
-		sdata[4] = 0;
+		spinor_config_addr_mode(sdata,page_addr,&txnum,SPINOR_FREAD_QUAD_OUT);
 
-		rxnum = rbyte_cnt;
+		txnum += 1;
+		rxnum   = rbyte_cnt;
 		tmp_buf = (u8 *)buf + (tmp_offset << 9);
 
 		spic_config_dual_mode(0, 2, 0, txnum);
